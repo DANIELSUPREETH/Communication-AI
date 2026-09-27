@@ -1,14 +1,12 @@
-# Render Blueprint: API + static frontend + Postgres.
-# Render dashboard → New → Blueprint → select this repo.
 databases:
-  - name: communicate-ai-db
+  - name: commai-daniel-db
     plan: free
     databaseName: communicate_ai
     user: communicate_ai
 
 services:
   - type: web
-    name: communicate-ai-api
+    name: commai-daniel-api
     runtime: python
     plan: free
     rootDir: backend
@@ -21,25 +19,25 @@ services:
       - key: AI_PROVIDER
         value: gemini
       - key: GEMINI_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.5-flash
       - key: GEMINI_API_KEY
-        sync: false # entered in the Render dashboard, never committed
+        sync: false
       - key: CORS_ORIGINS
-        sync: false # e.g. https://communicate-ai.onrender.com
+        value: https://commai-daniel.onrender.com
       - key: DATABASE_URL
         fromDatabase:
-          name: communicate-ai-db
+          name: commai-daniel-db
           property: connectionString
 
   - type: web
-    name: communicate-ai
+    name: commai-daniel
     runtime: static
     rootDir: frontend
     buildCommand: npm install && npm run build
     staticPublishPath: dist
     envVars:
       - key: VITE_API_URL
-        sync: false # e.g. https://communicate-ai-api.onrender.com
+        value: https://commai-daniel-api.onrender.com
     routes:
       - type: rewrite
         source: /*
