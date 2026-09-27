@@ -5,6 +5,7 @@ means implementing `generate_json` in a new subclass and registering it in
 `get_ai_service`.
 """
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 
@@ -61,6 +62,9 @@ class AIService(ABC):
 class GeminiService(AIService):
     name = "gemini"
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+    MAX_ATTEMPTS = 3
+    RETRY_DELAYS = (2.0, 5.0)  # seconds to wait before attempt 2 and attempt 3
+    RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
     def __init__(self, settings: Settings):
         if not settings.gemini_api_key or settings.gemini_api_key.strip() in {"", "YOUR_API_KEY"}:
@@ -82,23 +86,42 @@ class GeminiService(AIService):
         # Key goes in a header, never in the URL, so it can't leak into logs.
         headers = {"x-goog-api-key": self._api_key, "Content-Type": "application/json"}
 
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        except httpx.TimeoutException as exc:
-            raise AITimeoutError("Gemini request timed out") from exc
-        except httpx.HTTPError as exc:
-            logger.warning("Gemini network error: %s", type(exc).__name__)
-            raise AIUnavailableError("Gemini network error") from exc
+        # Gemini sometimes answers 429/503 when a model is busy. Those usually clear
+        # within seconds, so retry a few times with a growing pause before giving up.
+        response = None
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(url, json=payload, headers=headers)
+            except httpx.TimeoutException as exc:
+                raise AITimeoutError("Gemini request timed out") from exc
+            except httpx.HTTPError as exc:
+                logger.warning("Gemini network error: %s", type(exc).__name__)
+                if attempt == self.MAX_ATTEMPTS:
+                    raise AIUnavailableError("Gemini network error") from exc
+                await asyncio.sleep(self.RETRY_DELAYS[attempt - 1])
+                continue
+
+            if response.status_code in self.RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS:
+                logger.warning(
+                    "Gemini returned %s (attempt %d/%d), retrying",
+                    response.status_code, attempt, self.MAX_ATTEMPTS,
+                )
+                await asyncio.sleep(self.RETRY_DELAYS[attempt - 1])
+                continue
+            break
 
         if response.status_code in (401, 403):
             raise AIAuthError("Gemini rejected credentials")
         if response.status_code == 400 and "API_KEY_INVALID" in response.text:
             raise AIAuthError("Gemini API key invalid")
+        if response.status_code == 404:
+            logger.warning("Gemini model '%s' not found. Check GEMINI_MODEL.", self._model)
+            raise AIUnavailableError(f"Gemini model {self._model} not found")
         if response.status_code == 429 or response.status_code >= 500:
             raise AIUnavailableError(f"Gemini returned {response.status_code}")
         if response.status_code != 200:
-            logger.warning("Gemini unexpected status %s", response.status_code)
+            logger.warning("Gemini unexpected status %s: %s", response.status_code, response.text[:300])
             raise AIResponseError(f"Gemini returned {response.status_code}")
 
         try:
